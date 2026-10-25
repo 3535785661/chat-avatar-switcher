@@ -1,0 +1,9 @@
+{
+  "display_name": "聊天档案独立头像",
+  "loading_order": 1,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "ChatGPT",
+  "version": "0.1.0",
+  "homePage": "https://github.com/"
+}
