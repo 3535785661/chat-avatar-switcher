@@ -1,14 +1,15 @@
 (() => {
     'use strict';
-    const MODULE = 'chat_avatar_switcher', CHAT_KEY = 'chat_avatar_switcher_v1';
+    const MODULE = 'chat_avatar_switcher', CHAT_KEY = 'chat_avatar_switcher_v1', USER_KEY = 'chat_avatar_switcher_user_v1';
     const PANEL = 'cas-panel', BUTTON = 'cas-open', SETTINGS = 'cas-extension-settings';
     let applying = false, observer;
+    let currentMode = 'char'; // 'char' 或 'user'
 
     const ctx = () => { try { return window.SillyTavern?.getContext?.() || null } catch (e) { return null } };
 
     function settings() {
         const c = ctx();
-        if (!c?.extensionSettings) return { showFloatingButton: false }; // 默认关闭悬浮窗
+        if (!c?.extensionSettings) return { showFloatingButton: false };
         c.extensionSettings[MODULE] ??= {};
         if (typeof c.extensionSettings[MODULE].showFloatingButton !== 'boolean') c.extensionSettings[MODULE].showFloatingButton = false;
         return c.extensionSettings[MODULE];
@@ -90,7 +91,12 @@
         menu.appendChild(item);
     }
 
-    function saved() { return ctx()?.chatMetadata?.[CHAT_KEY]?.dataUrl || '' }
+    function saved() {
+        const c = ctx();
+        if (!c?.chatMetadata) return '';
+        const key = currentMode === 'char' ? CHAT_KEY : USER_KEY;
+        return c.chatMetadata[key]?.dataUrl || '';
+    }
 
     async function saveAvatar(data) {
         const c = ctx();
@@ -98,25 +104,44 @@
             alert('读取不到当前聊天元数据，请确认酒馆已打开聊天。');
             return;
         }
-        if (data) c.chatMetadata[CHAT_KEY] = { dataUrl: data, updatedAt: Date.now() };
-        else delete c.chatMetadata[CHAT_KEY];
+        const key = currentMode === 'char' ? CHAT_KEY : USER_KEY;
+        if (data) c.chatMetadata[key] = { dataUrl: data, updatedAt: Date.now() };
+        else delete c.chatMetadata[key];
         await c.saveMetadata();
         applyAvatar();
         updatePreview();
     }
 
     function defaultAvatar() {
-        const c = ctx(), ch = c?.characters?.[c?.characterId];
-        return ch?.avatar ? `/characters/${encodeURIComponent(ch.avatar)}` : '';
+        const c = ctx();
+        if (currentMode === 'char') {
+            const ch = c?.characters?.[c?.characterId];
+            return ch?.avatar ? `/characters/${encodeURIComponent(ch.avatar)}` : '';
+        } else {
+            // 获取 User 的默认头像
+            const firstUserImg = document.querySelector('.mes.is_user .avatar img');
+            if (firstUserImg) return firstUserImg.src;
+            return c?.user_avatar ? `/User Avatars/${encodeURIComponent(c.user_avatar)}` : '';
+        }
     }
 
-    function imageNodes() {
+    function getTargetImageNodes() {
         const out = [];
         document.querySelectorAll('.mes .avatar img,.mes .mesAvatar img,.mes .avatar').forEach(el => {
             const m = el.closest('.mes');
-            if (m && !m.classList.contains('is_user') && m.getAttribute('is_user') !== 'true') out.push(el);
+            const isUserMsg = m && (m.classList.contains('is_user') || m.getAttribute('is_user') === 'true');
+            
+            if (currentMode === 'char' && m && !isUserMsg) {
+                out.push(el);
+            } else if (currentMode === 'user' && isUserMsg) {
+                out.push(el);
+            }
         });
-        document.querySelectorAll('#avatar img,#avatar .avatar img,#character_avatar img,.character_avatar img').forEach(el => out.push(el));
+        
+        // 顶部角色头像（只针对角色修改）
+        if (currentMode === 'char') {
+            document.querySelectorAll('#avatar img,#avatar .avatar img,#character_avatar img,.character_avatar img').forEach(el => out.push(el));
+        }
         return [...new Set(out)];
     }
 
@@ -134,19 +159,47 @@
         if (applying) return;
         applying = true;
         try {
-            const url = saved() || defaultAvatar();
-            if (url) imageNodes().forEach(el => setImg(el, url));
+            const c = ctx();
+            if (!c?.chatMetadata) return;
+
+            // 应用角色头像
+            const charUrl = c.chatMetadata[CHAT_KEY]?.dataUrl || (c.characters?.[c.characterId]?.avatar ? `/characters/${encodeURIComponent(c.characters[c.characterId].avatar)}` : '');
+            if (charUrl) {
+                document.querySelectorAll('.mes .avatar img,.mes .mesAvatar img,.mes .avatar').forEach(el => {
+                    const m = el.closest('.mes');
+                    if (m && !m.classList.contains('is_user') && m.getAttribute('is_user') !== 'true') setImg(el, charUrl);
+                });
+                document.querySelectorAll('#avatar img,#avatar .avatar img,#character_avatar img,.character_avatar img').forEach(el => setImg(el, charUrl));
+            }
+
+            // 应用User头像（如果不设置，就不覆盖，让原生渲染）
+            const userUrl = c.chatMetadata[USER_KEY]?.dataUrl;
+            if (userUrl) {
+                document.querySelectorAll('.mes .avatar img,.mes .mesAvatar img,.mes .avatar').forEach(el => {
+                    const m = el.closest('.mes');
+                    if (m && (m.classList.contains('is_user') || m.getAttribute('is_user') === 'true')) setImg(el, userUrl);
+                });
+            }
         } finally { applying = false; }
     }
 
     function updatePreview() {
         const p = document.querySelector('#cas-preview');
-        if (!p) return;
-        const url = saved() || defaultAvatar();
-        p.src = url;
-        p.style.display = url ? 'block' : 'none';
-        const s = document.querySelector('#cas-status');
-        if (s) s.textContent = saved() ? '当前档案：已设置独立头像' : '当前档案：使用角色卡默认头像';
+        const status = document.querySelector('#cas-status');
+        
+        if (currentMode === 'char') {
+            document.querySelector('#cas-mode-char').classList.add('cas-active');
+            document.querySelector('#cas-mode-user').classList.remove('cas-active');
+            const url = saved() || defaultAvatar();
+            if (p) { p.src = url; p.style.display = url ? 'block' : 'none'; }
+            if (status) status.textContent = saved() ? '当前角色：已设置独立头像' : '当前角色：使用角色卡默认头像';
+        } else {
+            document.querySelector('#cas-mode-user').classList.add('cas-active');
+            document.querySelector('#cas-mode-char').classList.remove('cas-active');
+            const url = saved() || defaultAvatar();
+            if (p) { p.src = url; p.style.display = url ? 'block' : 'none'; }
+            if (status) status.textContent = saved() ? '当前User：已设置独立头像' : '当前User：使用系统默认头像';
+        }
     }
 
     function compress(file) {
@@ -169,7 +222,7 @@
         });
     }
 
-    // 3. 创建悬浮窗和弹窗面板（已修复标签语法错误）
+    // 3. 创建悬浮窗和弹窗面板（增加了切换Tab）
     function addPanel() {
         if (document.getElementById(PANEL)) return;
         const b = document.createElement('button');
@@ -182,19 +235,34 @@
 
         const p = document.createElement('section');
         p.id = PANEL;
-        // 修复了原本这里的 < img 和 </p > 的语法错误
+        
+        // 增加了切换按钮的UI
         p.innerHTML = `
             <div class="cas-head">
                 <strong>聊天档案独立头像</strong>
                 <button id="cas-close" type="button">×</button>
             </div>
-            <p class="cas-note">只作用于当前聊天档案，不修改角色卡原图。</p >
-            < img id="cas-preview" alt="头像预览">
-            <p id="cas-status"></p >
+            <p class="cas-note">只作用于当前聊天档案，不修改原角色卡/User配置。</p >
+            
+            <div class="cas-tabs" style="display:flex; gap:10px; margin-bottom:15px; border-bottom:1px solid #555; padding-bottom:10px;">
+                <button id="cas-mode-char" class="menu_button interactable" style="flex:1;">修改角色</button>
+                <button id="cas-mode-user" class="menu_button interactable" style="flex:1;">修改 User</button>
+            </div>
+
+            <div style="text-align: center; min-height: 80px;">
+                < img id="cas-preview" alt="头像预览" style="max-width: 80px; max-height: 80px; border-radius: 8px; object-fit: cover; margin: 0 auto; display: none;">
+            </div>
+            
+            <p id="cas-status" style="text-align:center; font-size:12px; margin: 10px 0;"></p >
+            
             <label class="cas-upload">选择头像图片<input id="cas-file" type="file" accept="image/*"></label>
-            <button id="cas-reset" type="button">恢复角色卡默认头像</button>
+            <button id="cas-reset" type="button">恢复当前对象默认头像</button>
             <p class="cas-small">建议使用正方形图片；图片会压缩后保存到当前聊天元数据。</p >`;
         document.body.appendChild(p);
+
+        // 切换逻辑
+        p.querySelector('#cas-mode-char').addEventListener('click', () => { currentMode = 'char'; updatePreview(); });
+        p.querySelector('#cas-mode-user').addEventListener('click', () => { currentMode = 'user'; updatePreview(); });
 
         b.addEventListener('click', () => {
             p.classList.add('cas-open', 'cas-forced-open');
@@ -206,7 +274,8 @@
         });
 
         p.querySelector('#cas-reset').addEventListener('click', () => {
-            if (confirm('恢复当前聊天档案的默认角色头像？')) saveAvatar('');
+            const targetName = currentMode === 'char' ? '角色' : 'User';
+            if (confirm(`恢复当前聊天档案的${targetName}默认头像？`)) saveAvatar('');
         });
 
         p.querySelector('#cas-file').addEventListener('change', async e => {
@@ -226,7 +295,7 @@
     function boot() {
         addPanel();
         addSettings();
-        addMenuButton(); // 注入魔法棒菜单
+        addMenuButton();
         applyAvatar();
         updatePreview();
         applyVisibility();
