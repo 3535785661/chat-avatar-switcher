@@ -11,7 +11,6 @@
     // 动态加载 Cropper.js
     function loadCropper(callback) {
         if (window.Cropper) return callback();
-        
         if (!document.getElementById('cas-cropper-css')) {
             const link = document.createElement('link');
             link.id = 'cas-cropper-css';
@@ -19,7 +18,6 @@
             link.href = 'https://cdn.jsdelivr.net/npm/cropperjs@1.6.1/dist/cropper.min.css';
             document.head.appendChild(link);
         }
-
         if (!document.getElementById('cas-cropper-js')) {
             const script = document.createElement('script');
             script.id = 'cas-cropper-js';
@@ -27,7 +25,6 @@
             script.onload = callback;
             document.head.appendChild(script);
         } else {
-            // 如果标签已存在但未加载完，加个轮询
             const t = setInterval(() => { if (window.Cropper) { clearInterval(t); callback(); } }, 100);
         }
     }
@@ -114,22 +111,44 @@
         menu.appendChild(item);
     }
 
-    function saved() {
+    function getMeta() {
         const c = ctx();
-        if (!c?.chatMetadata) return '';
+        if (!c?.chatMetadata) return {};
         const key = currentMode === 'char' ? CHAT_KEY : USER_KEY;
-        return c.chatMetadata[key]?.dataUrl || '';
+        return c.chatMetadata[key] || {};
     }
 
-    async function saveAvatar(data) {
+    function saved() { return getMeta().dataUrl || ''; }
+
+    // 升级版的保存逻辑：支持历史记录
+    async function saveAvatar(data, isFromHistory = false) {
         const c = ctx();
         if (!c?.chatMetadata || typeof c.saveMetadata !== 'function') {
             alert('读取不到当前聊天元数据，请确认酒馆已打开聊天。');
             return;
         }
         const key = currentMode === 'char' ? CHAT_KEY : USER_KEY;
-        if (data) c.chatMetadata[key] = { dataUrl: data, updatedAt: Date.now() };
-        else delete c.chatMetadata[key];
+        let meta = c.chatMetadata[key] || {};
+        if (!meta.history) meta.history = [];
+
+        if (data) {
+            // 去重：如果历史里已经有了，先删掉旧的，等下加到最前面
+            meta.history = meta.history.filter(url => url !== data);
+            
+            // 如果是从外面新传的图，放到最前面。如果是从历史里点的，就不动顺序。
+            if (!isFromHistory) {
+                meta.history.unshift(data);
+            }
+            
+            // 限制最多保存 12 张，防止文件无限膨胀
+            if (meta.history.length > 12) meta.history = meta.history.slice(0, 12);
+            meta.dataUrl = data;
+        } else {
+            // 恢复默认时，清空当前头像，但保留历史记录
+            delete meta.dataUrl;
+        }
+
+        c.chatMetadata[key] = meta;
         await c.saveMetadata();
         applyAvatar();
         updatePreview();
@@ -164,7 +183,6 @@
             const c = ctx();
             if (!c?.chatMetadata) return;
 
-            // 应用角色头像
             const charUrl = c.chatMetadata[CHAT_KEY]?.dataUrl || (c.characters?.[c.characterId]?.avatar ? `/characters/${encodeURIComponent(c.characters[c.characterId].avatar)}` : '');
             if (charUrl) {
                 document.querySelectorAll('.mes .avatar img,.mes .mesAvatar img,.mes .avatar').forEach(el => {
@@ -174,7 +192,6 @@
                 document.querySelectorAll('#avatar img,#avatar .avatar img,#character_avatar img,.character_avatar img').forEach(el => setImg(el, charUrl));
             }
 
-            // 应用User头像
             const userUrl = c.chatMetadata[USER_KEY]?.dataUrl;
             if (userUrl) {
                 document.querySelectorAll('.mes .avatar img,.mes .mesAvatar img,.mes .avatar').forEach(el => {
@@ -185,11 +202,46 @@
         } finally { applying = false; }
     }
 
+    // 渲染历史记录
+    function renderHistory() {
+        const container = document.querySelector('#cas-history-list');
+        if (!container) return;
+        
+        const meta = getMeta();
+        const history = meta.history || [];
+        const currentUrl = meta.dataUrl || '';
+
+        container.innerHTML = '';
+        
+        if (history.length === 0) {
+            container.innerHTML = '<span style="font-size:12px;color:#888;font-style:italic;">暂无历史记录，上传后会保存在这里</span>';
+            return;
+        }
+
+        history.forEach(url => {
+            const img = document.createElement('img');
+            img.src = url;
+            img.style.width = '42px';
+            img.style.height = '42px';
+            img.style.borderRadius = '6px';
+            img.style.objectFit = 'cover';
+            img.style.cursor = 'pointer';
+            // 当前选中的高亮绿色边框
+            img.style.border = (url === currentUrl) ? '2px solid #4caf50' : '2px solid transparent';
+            img.style.boxShadow = '0 2px 4px rgba(0,0,0,0.2)';
+            img.title = '点击切换到此头像';
+            
+            img.onclick = () => {
+                saveAvatar(url, true);
+            };
+            container.appendChild(img);
+        });
+    }
+
     function updatePreview() {
         const p = document.querySelector('#cas-preview');
         const status = document.querySelector('#cas-status');
         
-        // 如果正在裁剪，就不更新预览，防止闪动
         if (cropperInstance) return;
 
         document.querySelector('#cas-mode-char').classList.toggle('cas-active', currentMode === 'char');
@@ -198,9 +250,11 @@
         const url = saved() || defaultAvatar();
         if (p) { p.src = url; p.style.display = url ? 'block' : 'none'; }
         if (status) status.textContent = saved() ? `当前${currentMode==='char'?'角色':'User'}：已设置独立头像` : `当前${currentMode==='char'?'角色':'User'}：使用默认头像`;
+        
+        // 更新历史列表
+        renderHistory();
     }
 
-    // 弹窗面板
     function addPanel() {
         if (document.getElementById(PANEL)) return;
         const b = document.createElement('button');
@@ -214,14 +268,12 @@
         const p = document.createElement('section');
         p.id = PANEL;
         
-        // 增加裁剪界面容器
         p.innerHTML = `
             <div class="cas-head">
                 <strong>聊天档案独立头像</strong>
                 <button id="cas-close" type="button">×</button>
             </div>
             
-            <!-- 预览/操作界面 -->
             <div id="cas-main-view">
                 <p class="cas-note">只作用于当前聊天档案，不修改原角色卡/User配置。</p>
                 <div class="cas-tabs" style="display:flex; gap:10px; margin-bottom:15px; border-bottom:1px solid #555; padding-bottom:10px;">
@@ -234,31 +286,55 @@
                 <p id="cas-status" style="text-align:center; font-size:12px; margin: 10px 0;"></p>
                 <label class="cas-upload">选择头像图片<input id="cas-file" type="file" accept="image/*"></label>
                 <button id="cas-reset" type="button">恢复当前对象默认头像</button>
-                <p class="cas-small">建议使用正方形图片；图片会压缩后保存到当前聊天元数据。</p>
+                
+                <!-- 历史记录展示区 -->
+                <div style="margin-top: 15px; border-top: 1px dashed #555; padding-top: 10px;">
+                    <p style="font-size: 12px; margin-bottom: 5px; color: #ccc;">历史头像（点击即可切换）：</p>
+                    <div id="cas-history-list" style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 5px; flex-wrap: wrap;">
+                        <!-- 这里会动态插入图片 -->
+                    </div>
+                </div>
+
+                <p class="cas-small" style="margin-top: 15px;">建议使用正方形图片；图片会压缩后保存到当前聊天元数据。</p>
             </div>
 
-            <!-- 裁剪界面 (默认隐藏) -->
             <div id="cas-crop-view" style="display: none;">
                 <p class="cas-note" style="margin-bottom:5px;">拖拽移动 / 双指缩放 / 滚轮缩放</p>
+                
+                <div style="display: flex; gap: 5px; margin-bottom: 10px; justify-content: center;">
+                    <button class="menu_button cas-ratio-btn cas-active" data-ratio="1">1:1</button>
+                    <button class="menu_button cas-ratio-btn" data-ratio="1.3333">4:3</button>
+                    <button class="menu_button cas-ratio-btn" data-ratio="0.75">3:4</button>
+                    <button class="menu_button cas-ratio-btn" data-ratio="NaN">自由</button>
+                </div>
+
                 <div style="width: 100%; height: 300px; background: #222; border-radius: 8px; overflow: hidden; margin-bottom: 10px;">
                     <img id="cas-crop-image" style="max-width: 100%; display: block;">
                 </div>
+                
                 <div style="display: flex; gap: 5px; margin-bottom: 10px; justify-content: center;">
                     <button id="cas-btn-zoom-in" class="menu_button" title="放大"><i class="fa-solid fa-search-plus"></i></button>
                     <button id="cas-btn-zoom-out" class="menu_button" title="缩小"><i class="fa-solid fa-search-minus"></i></button>
                     <button id="cas-btn-rotate-left" class="menu_button" title="向左旋转"><i class="fa-solid fa-rotate-left"></i></button>
                     <button id="cas-btn-rotate-right" class="menu_button" title="向右旋转"><i class="fa-solid fa-rotate-right"></i></button>
                 </div>
+                
+                <label class="checkbox_label" style="justify-content: center; margin-bottom: 10px;">
+                    <input type="checkbox" id="cas-hd-check" checked>
+                    <span>高清模式（不压缩画质 / 最高支持1024px）</span>
+                </label>
+
                 <div style="display: flex; gap: 10px;">
                     <button id="cas-crop-confirm" class="menu_button" style="flex:1; background: #4caf50; color: white;">确认裁剪</button>
                     <button id="cas-crop-cancel" class="menu_button" style="flex:1;">取消</button>
                 </div>
             </div>
             
-            <!-- 内联样式用于修正按钮激活状态 -->
             <style>
                 .cas-active { background-color: var(--interactable-bg-hover) !important; border-color: var(--interactable-border) !important; color: var(--text-color) !important; font-weight: bold; }
                 .cropper-view-box { outline: 2px solid #4caf50; outline-color: rgba(76, 175, 80, 0.75); }
+                #cas-history-list::-webkit-scrollbar { height: 6px; }
+                #cas-history-list::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
             </style>`;
         document.body.appendChild(p);
 
@@ -266,7 +342,6 @@
         const cropView = p.querySelector('#cas-crop-view');
         const cropImg = p.querySelector('#cas-crop-image');
 
-        // 切换逻辑
         p.querySelector('#cas-mode-char').addEventListener('click', () => { currentMode = 'char'; updatePreview(); });
         p.querySelector('#cas-mode-user').addEventListener('click', () => { currentMode = 'user'; updatePreview(); });
 
@@ -282,10 +357,19 @@
 
         p.querySelector('#cas-reset').addEventListener('click', () => {
             const targetName = currentMode === 'char' ? '角色' : 'User';
-            if (confirm(`恢复当前聊天档案的${targetName}默认头像？`)) saveAvatar('');
+            if (confirm(`恢复当前聊天档案的${targetName}默认头像？（历史记录会保留）`)) saveAvatar('');
         });
 
-        // 选文件 -> 进入裁剪模式
+        const ratioBtns = p.querySelectorAll('.cas-ratio-btn');
+        ratioBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                ratioBtns.forEach(b => b.classList.remove('cas-active'));
+                e.target.classList.add('cas-active');
+                const ratioVal = parseFloat(e.target.dataset.ratio);
+                cropperInstance?.setAspectRatio(isNaN(ratioVal) ? NaN : ratioVal);
+            });
+        });
+
         p.querySelector('#cas-file').addEventListener('change', async e => {
             const f = e.target.files?.[0];
             if (!f) return;
@@ -300,14 +384,17 @@
                         
                         if (cropperInstance) cropperInstance.destroy();
                         
-                        // 延迟一点初始化，确保 DOM 已经显示出来，防止尺寸计算错误
+                        ratioBtns.forEach(b => b.classList.remove('cas-active'));
+                        ratioBtns[0].classList.add('cas-active');
+
                         setTimeout(() => {
                             cropperInstance = new Cropper(cropImg, {
-                                aspectRatio: 1, // 强制正方形
-                                viewMode: 1,    // 限制裁剪框不能超出图片
+                                aspectRatio: 1,
+                                viewMode: 1,
                                 dragMode: 'move',
                                 autoCropArea: 0.8,
                                 restore: false,
+                                checkOrientation: true,
                                 guides: false,
                                 center: false,
                                 highlight: false,
@@ -322,20 +409,19 @@
             } finally { e.target.value = ''; }
         });
 
-        // 裁剪控制器按钮
         p.querySelector('#cas-btn-zoom-in').addEventListener('click', () => cropperInstance?.zoom(0.1));
         p.querySelector('#cas-btn-zoom-out').addEventListener('click', () => cropperInstance?.zoom(-0.1));
         p.querySelector('#cas-btn-rotate-left').addEventListener('click', () => cropperInstance?.rotate(-90));
         p.querySelector('#cas-btn-rotate-right').addEventListener('click', () => cropperInstance?.rotate(90));
 
-        // 确认裁剪
         p.querySelector('#cas-crop-confirm').addEventListener('click', () => {
             if (!cropperInstance) return;
-            // 获取裁剪后的 canvas，并缩放到最大 320x320
-            const canvas = cropperInstance.getCroppedCanvas({ maxWidth: 320, maxHeight: 320 });
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+            const isHD = p.querySelector('#cas-hd-check').checked;
+            let canvasOptions = isHD ? { maxWidth: 1024, maxHeight: 1024 } : { maxWidth: 320, maxHeight: 320 };
+            const canvas = cropperInstance.getCroppedCanvas(canvasOptions);
+            const dataUrl = isHD ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.82);
             
-            saveAvatar(dataUrl).then(() => {
+            saveAvatar(dataUrl, false).then(() => { // 传 false 表示新图，要存历史
                 cropperInstance.destroy();
                 cropperInstance = null;
                 cropView.style.display = 'none';
@@ -344,7 +430,6 @@
             });
         });
 
-        // 取消裁剪
         p.querySelector('#cas-crop-cancel').addEventListener('click', () => {
             if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
             cropView.style.display = 'none';
